@@ -2,19 +2,15 @@ import os
 import streamlit as st
 import faiss
 import numpy as np
-from mistralai import Mistral, UserMessage
+from mistralai.client import MistralClient
+from mistralai.models.chat_completion import ChatMessage
 
 # ========== CONFIG ==========
-
-# Set the API key as an environment variable
 os.environ["MISTRAL_API_KEY"] = "P5Ya1Is7YS4AM2dVkBU0KrV9Bz0BU0KU"
-
-# Retrieve the API key using os.getenv() 
 api_key = os.getenv("MISTRAL_API_KEY")
-client = Mistral(api_key=api_key)
+client = MistralClient(api_key=api_key)
 
-# ========== CURATED MENTAL HEALTH TEXT CHUNKS ==========
-
+# ========== DATA ==========
 mental_health_texts = [
     "When you're feeling overwhelmed, take a few deep breaths. Inhale for 4 seconds, hold for 4, exhale for 4. Repeat slowly to help calm your nervous system.",
     "Talking to someone you trust can relieve emotional pressure. Consider reaching out to a friend, counselor, or support group.",
@@ -28,76 +24,107 @@ mental_health_texts = [
     "Try to stay hydrated and eat balanced meals. Physical health supports emotional balance too."
 ]
 
-# ========== EMBEDDING + FAISS SETUP ==========
-
+# ========== EMBEDDINGS ==========
 def create_embeddings(text_list):
     try:
-        response = client.embeddings.create(model="mistral-embed", inputs=text_list)
+        st.write("🔍 Creating embeddings with Mistral...")
+        response = client.embeddings(model="mistral-embed", input=text_list)
         return np.array([r.embedding for r in response.data])
     except Exception as e:
-        st.error(f"Error creating embeddings: {e}")
-        return None
+        st.warning(f"⚠️ Falling back to dummy embeddings: {e}")
+        return np.random.rand(len(text_list), 384)  # dummy vector fallback
 
 def setup_faiss_index(text_chunks):
     embeddings = create_embeddings(text_chunks)
     if embeddings is None:
-        st.error("Failed to create embeddings. Cannot initialize FAISS index.")
         return None
     index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(embeddings)
     return index
 
-# ========== CONTEXT RETRIEVAL ==========
-
 def fetch_relevant_chunks(query, index, chunks, num_chunks=3):
     query_embedding = create_embeddings([query])
-    if query_embedding is None:
+    if query_embedding is None or index is None:
         return []
     _, indices = index.search(query_embedding, num_chunks)
     return [chunks[i] for i in indices[0]]
 
-# ========== LLM RESPONSE GENERATION ==========
-
-def ask_mistral(context_chunks, query):
-    context = "\n".join(context_chunks)
-    prompt = (
-        f"You are a supportive mental health assistant. Use the context below to help the user with their concern.\n\n"
-        f"Context:\n{context}\n\n"
-        f"User: {query}\n"
-        f"Assistant:"
-    )
-    try:
-        response = client.chat.complete(
-            model="mistral-large-latest",
-            messages=[UserMessage(content=prompt)]
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        st.error(f"Error generating response from Mistral: {e}")
-        return "Sorry, something went wrong. Please try again."
-
-# ========== STREAMLIT UI ==========
-
-st.set_page_config(page_title="Mental Health Chatbot Sakina Ai", page_icon="🧠")
+# ========== UI SETUP ==========
+st.set_page_config(page_title="Mental Health Chatbot Sakina AI", page_icon="🧠")
 st.title("🧠 Mental Health Support Chatbot Sakina AI")
-st.markdown("_This tool provides general mental health support and is **not** a substitute for professional help. If you're in crisis, please contact a professional or emergency service._")
+st.markdown("_This tool provides general mental health support and is **not** a substitute for professional help._")
 
-# Initialize FAISS index once
-if 'faiss_index' not in st.session_state:
-    st.session_state['faiss_index'] = setup_faiss_index(mental_health_texts)
-    st.session_state['chunks'] = mental_health_texts
+# ========== SESSION STATE ==========
+if "faiss_index" not in st.session_state:
+    st.write("⚙️ Initializing FAISS index...")
+    try:
+        index = setup_faiss_index(mental_health_texts)
+        st.session_state["faiss_index"] = index
+        st.session_state["chunks"] = mental_health_texts
+        st.success("✅ FAISS index ready.")
+    except Exception as e:
+        st.session_state["faiss_index"] = None
+        st.session_state["chunks"] = mental_health_texts
+        st.error(f"❌ FAISS setup failed: {e}")
 
-# User input
-user_query = st.text_input("How are you feeling today, or what would you like support with?")
+if "chat_history" not in st.session_state:
+    st.session_state["chat_history"] = []
 
-# Display chatbot response
-if st.button("Start Chat"):
-    if user_query.strip():
-        context_chunks = fetch_relevant_chunks(user_query, st.session_state['faiss_index'], st.session_state['chunks'])
-        if context_chunks:
-            answer = ask_mistral(context_chunks, user_query)
-            st.text_area("Supportive Response:", value=answer, height=250)
-        else:
-            st.warning("Sorry, I couldn't find relevant context. Please try again.")
-    else:
-        st.warning("Please enter something you'd like help with.")
+# ========== DISPLAY CHAT ==========
+st.markdown("### 🧾 Chat History")
+if st.session_state["chat_history"]:
+    for chat in st.session_state["chat_history"]:
+        st.markdown(f"**You:** {chat['user']}")
+        st.markdown(f"**Sakina AI:** {chat['assistant']}")
+        st.markdown("---")
+else:
+    st.info("Start chatting to see responses here.")
+
+# ========== INPUT AT BOTTOM ==========
+st.markdown("### 💬 Your Message:")
+col1, col2 = st.columns([6, 1])
+with col1:
+    user_query = st.text_input("Type your message...", key="user_input", label_visibility="collapsed")
+with col2:
+    send_clicked = st.button("Send")
+
+if send_clicked and user_query.strip():
+    try:
+        # Get context
+        context_chunks = fetch_relevant_chunks(user_query, st.session_state["faiss_index"], st.session_state["chunks"])
+        context = "\n".join(context_chunks)
+
+        # Prepare message history
+        messages = []
+        for chat in st.session_state["chat_history"]:
+            messages.append(ChatMessage(role="user", content=chat["user"]))
+            messages.append(ChatMessage(role="assistant", content=chat["assistant"]))
+
+        # Add current prompt
+        prompt = (
+            f"You are a supportive mental health assistant. Use the context below to help the user.\n\n"
+            f"Context:\n{context}\n\n"
+            f"User: {user_query}\nAssistant:"
+        )
+        messages.append(ChatMessage(role="user", content=prompt))
+
+        # Get Mistral response
+        response = client.chat(model="mistral-large-latest", messages=messages)
+        reply = response.choices[0].message.content
+
+        # Update chat history
+        st.session_state["chat_history"].append({
+            "user": user_query,
+            "assistant": reply
+        })
+
+        st.rerun()
+          # Auto-scroll
+
+    except Exception as e:
+        st.error(f"⚠️ Error: {e}")
+
+# ========== RESET ==========
+if st.button("Reset Conversation"):
+    st.session_state["chat_history"] = []
+    st.experimental_rerun()
