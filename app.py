@@ -38,7 +38,7 @@ def get_context_from_kg(query, G):
             context_nodes.add(node)
             context_nodes.update(G.successors(node))
             context_nodes.update(G.predecessors(node))
-i
+
     if not context_nodes:
         return ["I'm here to support you. Could you tell me a bit more about what you're feeling?"]
 
