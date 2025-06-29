@@ -1,4 +1,4 @@
-mport os
+import os
 import streamlit as st
 from mistralai.client import MistralClient
 from mistralai.models.chat_completion import ChatMessage
